@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Local outputs
+*.jsonl
+*.txt
+demo_report.json
+demo_cleaned.txt
+
+# Exclude lecture notes file per request
+2 - 信息检索（中文）.md
