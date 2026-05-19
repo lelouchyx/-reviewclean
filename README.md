@@ -11,7 +11,8 @@
 ## 目录说明
 
 - app.py: Streamlit 前端入口
-- comment_fetcher.py: 评论抓取模块
+- fetcher_youtube.py: YouTube 抓取模块（comment_fetcher.py 兼容入口）
+- fetcher_steam.py: Steam 抓取模块（含追评/编辑标记）
 - comment_cleaner.py: 评论清洗与去重模块
 - comment_analyzer.py: 评论分析模块
 - comment_io.py: 输入读取工具
@@ -51,7 +52,13 @@ pip install deep-translator selenium youtube-comment-downloader jieba nltk
 抓取评论：
 
 ```powershell
-.\.venv\Scripts\python.exe .\comment_fetcher.py --source "https://www.youtube.com/watch?v=VIDEO_ID" --limit 200 --output fetched_comments.jsonl --text-output fetched_comments.txt
+.\.venv\Scripts\python.exe .\fetcher-youtube.py --source "https://www.youtube.com/watch?v=VIDEO_ID" --limit 200 --output fetched_comments.jsonl --text-output fetched_comments.txt
+```
+
+抓取 Steam 评论（含追评检测）：
+
+```powershell
+.\.venv\Scripts\python.exe .\fetcher-steam.py --source "https://steamcommunity.com/app/1260320/reviews/?browsefilter=trendweek&p=1&filterLanguage=default" --limit 200 --output steam_reviews.jsonl --text-output steam_reviews.txt
 ```
 
 清洗评论：
