@@ -1,12 +1,32 @@
-.venv/
+# Python
 __pycache__/
 *.pyc
+.venv/
+**/.venv/
+**/__pycache__/
 
-# Local outputs
-*.jsonl
-*.txt
-demo_report.json
-demo_cleaned.txt
+# Local browser/session data
+/browser_data/
+review-global/browser_data/*
+!review-global/browser_data/x_public_reply_snapshots/
+review-global/browser_data/x_public_reply_snapshots/*
+!review-global/browser_data/x_public_reply_snapshots/2052327582277009536.jsonl
 
-# Exclude lecture notes file per request
+# Local reference project, not part of current GitHub package
+review-local/
+
+# Generated local outputs
+bilibili_comments_*.json
+bilibili_comments_*.csv
+bilibili_comments_*.txt
+bilibili_comments_*.md
+inspect_bili_logged_in.png
+review-global/*.jsonl
+review-global/*.txt
+review-global/demo_report.json
+review-global/demo_cleaned.txt
+review-global/nte_x_visible_replies_en_zh_20.csv
+
+# Notes excluded by request
 2 - 信息检索（中文）.md
+review-global/2 - 信息检索（中文）.md

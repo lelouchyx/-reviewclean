@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from collections import Counter
+from contextlib import contextmanager
+from datetime import datetime
+import os
 import re
 import unicodedata
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
@@ -12,14 +17,11 @@ from wordcloud import WordCloud
 
 from comment_analyzer import (
     AnalysisResult,
-    NEGATIVE_CN,
-    NEGATIVE_EN,
-    POSITIVE_CN,
-    POSITIVE_EN,
     analyze_comments,
 )
-from comment_cleaner import CleanerConfig, clean_comments, normalize_text, tokenize
+from comment_cleaner import CleanerConfig, clean_comments, contains_cjk, normalize_text, tokenize
 from comment_fetcher import collect_from_source
+from fetcher_x import has_x_saved_login_state, login_x_and_save_session
 
 try:
     from deep_translator import GoogleTranslator  # type: ignore
@@ -41,6 +43,32 @@ TRANSLATION_LANGUAGES = {
 URL_PATTERN = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 WHITESPACE_PATTERN = re.compile(r"\s+")
 PUNCT_PATTERN = re.compile(r"[^\w\u4e00-\u9fff<>!? ]+", re.UNICODE)
+X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.x.com", "mobile.twitter.com"}
+
+
+@contextmanager
+def temporary_env_vars(updates: dict[str, str | None]):
+    previous_values: dict[str, str | None] = {}
+    try:
+        for key, value in updates.items():
+            previous_values[key] = os.environ.get(key)
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        yield
+    finally:
+        for key, previous in previous_values.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
+def is_x_source(source: str) -> bool:
+    parsed = urlparse(source.strip())
+    host = parsed.netloc.lower().split(":")[0]
+    return bool(host) and (host in X_HOSTS or host.endswith("x.com") or host.endswith("twitter.com"))
 
 
 def get_wordcloud_font_path() -> str | None:
@@ -213,86 +241,168 @@ def summarize_common_conclusions(
     if not raw_comments:
         return conclusions
 
-    theme_keywords: dict[str, set[str]] = {
-        "速度与效率": {"fast", "speed", "quick", "slow", "lag", "卡", "快", "慢", "速度", "延迟"},
-        "效果与稳定性": {"quality", "result", "output", "bug", "broken", "稳定", "不稳定", "效果", "崩", "修复"},
-        "价格与价值": {"price", "pricing", "expensive", "cheap", "cost", "worth", "贵", "便宜", "价格", "值", "订阅"},
-        "易用性与流程整合": {"easy", "simple", "workflow", "tool", "入口", "方便", "一站", "整合", "上手", "省事"},
-        "推送与营销打扰": {"ads", "ad", "promo", "discount", "coupon", "推送", "广告", "营销", "优惠", "链接"},
-    }
+    conclusions.append(summarize_publication_distribution(fetched))
+    conclusions.append(summarize_language_distribution(raw_comments))
+    conclusions.append(summarize_topic_overlap(raw_comments, analysis))
 
-    positive_themes = {name: 0 for name in theme_keywords}
-    negative_themes = {name: 0 for name in theme_keywords}
+    rating_line = summarize_rating_signal(fetched)
+    if rating_line:
+        conclusions.append(rating_line)
 
-    for text in raw_comments:
-        normalized = normalize_text(text)
-        tokens = tokenize(normalized)
-        token_set = set(tokens)
-        pos_hits = sum(1 for token in token_set if token in POSITIVE_CN or token in POSITIVE_EN)
-        neg_hits = sum(1 for token in token_set if token in NEGATIVE_CN or token in NEGATIVE_EN)
+    return conclusions
 
-        matched_themes: list[str] = []
-        lowered = normalized.lower()
-        for theme, keywords in theme_keywords.items():
-            if any(keyword in lowered for keyword in keywords):
-                matched_themes.append(theme)
 
-        if not matched_themes:
+def normalize_publication_label(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    text = re.sub(r"^(posted|发布于)\s*[:：]?\s*", "", text, flags=re.IGNORECASE).strip()
+    lowered = text.lower()
+
+    if "today" in lowered or "今天" in text:
+        return "今天"
+    if "yesterday" in lowered or "昨天" in text:
+        return "昨天"
+    if re.search(r"\b(hour|hours|hr|hrs|minute|minutes|min|mins)\b", lowered):
+        return "今天"
+
+    day_ago_match = re.search(r"(\d+)\s+days?\s+ago", lowered)
+    if day_ago_match:
+        return f"{day_ago_match.group(1)}天前"
+
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%b %d", "%B %d"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return f"{parsed.month}月{parsed.day}日"
+        except ValueError:
             continue
 
-        if pos_hits >= neg_hits:
-            for theme in matched_themes:
-                positive_themes[theme] += 1
+    zh_match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+    if zh_match:
+        return f"{int(zh_match.group(1))}月{int(zh_match.group(2))}日"
+
+    return text
+
+
+def build_raw_language_distribution(raw_comments: list[str]) -> dict[str, int]:
+    counts = Counter({"zh": 0, "en": 0, "mixed_or_other": 0})
+    for text in raw_comments:
+        has_cjk = any(contains_cjk(ch) for ch in text)
+        has_alpha = any(ch.isalpha() and not contains_cjk(ch) for ch in text)
+        if has_cjk and has_alpha:
+            counts["mixed_or_other"] += 1
+        elif has_cjk:
+            counts["zh"] += 1
+        elif has_alpha:
+            counts["en"] += 1
         else:
-            for theme in matched_themes:
-                negative_themes[theme] += 1
+            counts["mixed_or_other"] += 1
+    return dict(counts)
 
-    top_positive = [name for name, count in sorted(positive_themes.items(), key=lambda item: item[1], reverse=True) if count > 0][:3]
-    top_negative = [name for name, count in sorted(negative_themes.items(), key=lambda item: item[1], reverse=True) if count > 0][:3]
 
-    dominant_sentiment = max(analysis.sentiment_distribution, key=analysis.sentiment_distribution.get)
-    skeptical_count = int((comparison_df.get("tone_label", pd.Series(dtype=str)) == "skeptical").sum())
-    skeptical_ratio = skeptical_count / len(raw_comments) if raw_comments else 0.0
+def summarize_publication_distribution(fetched: list[Any]) -> str:
+    labels = [normalize_publication_label(getattr(item, "published_at", None)) for item in fetched]
+    counts = Counter(label for label in labels if label)
+    total = sum(counts.values())
+    if total == 0:
+        return "评论分布：当前样本缺少稳定的发布时间信息，暂时无法判断是否存在集中爆发。"
 
-    if top_positive and top_negative:
-        conclusions.append(
-            "从原始评论看，正面反馈主要集中在"
-            + "、".join(top_positive)
-            + "；负面反馈更集中在"
-            + "、".join(top_negative)
-            + "。"
-        )
-    elif top_positive:
-        conclusions.append("从原始评论看，正面讨论主要集中在" + "、".join(top_positive) + "，负面焦点相对分散。")
-    elif top_negative:
-        conclusions.append("从原始评论看，负面讨论主要集中在" + "、".join(top_negative) + "，正面焦点相对分散。")
+    top_dates = counts.most_common(2)
+    distribution_text = "，".join(f"{label} {count}条" for label, count in top_dates)
+    top_ratio = top_dates[0][1] / total
+    top_two_ratio = sum(count for _, count in top_dates) / total
+
+    if top_ratio >= 0.5 or top_two_ratio >= 0.7:
+        judgment = "发布时间明显集中在少数时间点，说明更像一次事件驱动的集中反馈，存在短时舆情放大的风险。"
+    elif top_ratio >= 0.3:
+        judgment = "发布时间有一定集中，但还不是单点爆发式分布。"
     else:
-        conclusions.append("从原始评论看，讨论焦点较分散，尚未形成清晰的单一主题。")
+        judgment = "发布时间相对分散，暂时看不出明显的单次爆发。"
 
-    if dominant_sentiment == "positive":
-        conclusions.append("整体情绪偏正向，但用户评价并非单纯叫好，更强调实际体验是否持续稳定。")
-    elif dominant_sentiment == "negative":
-        conclusions.append("整体情绪偏负向，核心矛盾集中在结果预期与实际体验之间的落差。")
+    return f"评论分布：可识别发布时间的 {total} 条样本里，{distribution_text}。{judgment}"
+
+
+def summarize_language_distribution(raw_comments: list[str]) -> str:
+    counts = build_raw_language_distribution(raw_comments)
+    total = max(sum(counts.values()), 1)
+    zh_ratio = counts.get("zh", 0) / total
+    en_ratio = counts.get("en", 0) / total
+    mixed_ratio = counts.get("mixed_or_other", 0) / total
+
+    summary = (
+        f"原始评论语种：英文 {counts.get('en', 0)} 条（{en_ratio:.1%}），"
+        f"中文 {counts.get('zh', 0)} 条（{zh_ratio:.1%}），"
+        f"混合/其他 {counts.get('mixed_or_other', 0)} 条（{mixed_ratio:.1%}）。"
+    )
+
+    if en_ratio >= 0.6:
+        return summary + " 这说明讨论主体主要来自英文区，更像英语社区中的共性问题。"
+    if zh_ratio >= 0.6:
+        return summary + " 这说明讨论主体主要来自中文区，更像中文社区中的集中反馈。"
+    if en_ratio >= 0.2 and zh_ratio >= 0.2:
+        return summary + " 这不是单一语种社区的孤立问题，而是跨语种都在重复出现的共性争议。"
+    return summary + " 当前语种分布较混合，需要结合来源平台再判断问题主要在哪个社区发酵。"
+
+
+def summarize_topic_overlap(raw_comments: list[str], analysis: AnalysisResult) -> str:
+    theme_keywords: dict[str, set[str]] = {
+        "AI/原创与创作争议": {"ai", "gen ai", "ai slop", "artist", "artists", "art", "contest", "plagiarism", "原创", "美术", "生成", "ai创作", "比赛"},
+        "价格与价值": {"price", "pricing", "expensive", "cheap", "cost", "worth", "贵", "便宜", "价格", "值", "涨价"},
+        "更新/内容与运营": {"update", "updates", "content", "campaign", "event", "运营", "更新", "内容", "活动", "维护", "宣传"},
+        "体验/稳定性与玩法": {"bug", "broken", "crash", "lag", "physics", "controls", "gameplay", "体验", "稳定", "卡", "崩", "玩法", "手感", "修复"},
+        "社区/尊重与品牌信任": {"community", "respect", "disrespect", "support", "reputation", "trust", "company", "社区", "尊重", "口碑", "信任", "公司", "忽视"},
+    }
+
+    counts = Counter({theme: 0 for theme in theme_keywords})
+    for text in raw_comments:
+        lowered = normalize_text(text).lower()
+        for theme, keywords in theme_keywords.items():
+            if any(keyword in lowered for keyword in keywords):
+                counts[theme] += 1
+
+    matched = [(theme, count) for theme, count in counts.most_common() if count > 0]
+    if not matched:
+        fallback_terms = "、".join(term for term, _ in analysis.top_terms[:5]) if analysis.top_terms else "暂无明显中心词"
+        return f"讨论中心重合度：当前样本未能稳定归入预设主题，讨论相对分散；从词项上看，主要围绕 {fallback_terms} 展开。"
+
+    total = max(len(raw_comments), 1)
+    top_theme, top_count = matched[0]
+    top_ratio = top_count / total
+    top_two_ratio = sum(count for _, count in matched[:2]) / total
+    focus_text = "，".join(f"{theme} {count / total:.1%}" for theme, count in matched[:3])
+
+    if top_ratio >= 0.5:
+        judgment = f"讨论高度重合，约 {top_ratio:.1%} 的样本都集中在“{top_theme}”这一核心问题上。"
+    elif top_two_ratio >= 0.6:
+        judgment = f"讨论主要集中在少数几个问题上，其中“{top_theme}”最突出，其次还有第二焦点。"
     else:
-        conclusions.append("整体情绪偏中性，用户更像在做功能与成本之间的理性权衡。")
+        judgment = "讨论中心存在，但还没有收敛到单一议题。"
 
-    total_sentiments = sum(analysis.sentiment_distribution.values())
-    if total_sentiments > 0:
-        positive_ratio = analysis.sentiment_distribution.get("positive", 0) / total_sentiments
-        neutral_ratio = analysis.sentiment_distribution.get("neutral", 0) / total_sentiments
-        negative_ratio = analysis.sentiment_distribution.get("negative", 0) / total_sentiments
-        conclusions.append(
-            f"情绪占比上，正向约 {positive_ratio:.1%}、中立约 {neutral_ratio:.1%}、负向约 {negative_ratio:.1%}；"
-            "负向占比走高通常意味着反馈偏差，中立占比较高通常说明反馈偏观察和保留态度。"
-        )
+    return f"讨论中心重合度：{judgment} 当前最主要的讨论方向依次是 {focus_text}。这说明样本并不是零散抱怨，而是在重复表达少数几个关键问题。"
 
-    if skeptical_ratio >= 0.25:
-        conclusions.append("反问与怀疑语气占比较高，说明评论区对“值不值”和“稳不稳”这两类问题仍有明显争论。")
+
+def summarize_rating_signal(fetched: list[Any]) -> str | None:
+    ratings = [1.0 if getattr(item, "recommended", None) else 0.0 for item in fetched if getattr(item, "recommended", None) is not None]
+    if not ratings:
+        return None
+
+    average_score = sum(ratings) / len(ratings)
+    recommended_count = sum(1 for score in ratings if score >= 1.0)
+    not_recommended_count = len(ratings) - recommended_count
+    score_100 = average_score * 100
+
+    if average_score >= 0.6:
+        tone = "整体偏正面。"
+    elif average_score <= 0.4:
+        tone = "整体偏负面。"
     else:
-        conclusions.append("反问与怀疑语气处于可控区间，讨论更多围绕具体使用体验而不是情绪化对立。")
+        tone = "整体呈现分化。"
 
-    conclusions.append("从消费级 AI 产品的评价结构看，这批评论呈现出典型特征：功能可用性已被认可，但价值感和稳定性仍是决定口碑是否能持续的关键。")
-    return conclusions
+    return (
+        f"评分机制：当前样本可按显式推荐/不推荐折算为二元评分，平均得分约 {score_100:.1f}/100；"
+        f"其中推荐 {recommended_count} 条，不推荐 {not_recommended_count} 条，{tone}"
+    )
 
 
 def render_raw_comment_common_conclusions(
@@ -301,7 +411,7 @@ def render_raw_comment_common_conclusions(
     analysis: AnalysisResult,
     comparison_df: pd.DataFrame,
 ) -> None:
-    st.subheader("原始评论共性结论（独立栏目）")
+    st.subheader("原始评论总结")
     with st.container(border=True):
         lines = summarize_common_conclusions(
             raw_comments=raw_comments,
@@ -511,14 +621,49 @@ def preserve_terminal_punctuation(source_text: str, translated_text: str) -> str
 
 
 st.title("通用评论抓取与分析")
-st.write("输入网址或本地文件路径，系统会自动抓取评论、清洗去重并给出可视化分析结论。")
+st.write("输入 X、Steam、YouTube 网址或本地文件路径，系统会自动抓取评论、清洗去重并给出可视化分析结论。")
 
 with st.sidebar:
     st.header("抓取参数")
     source = st.text_input("网址或本地文件路径", value="https://www.youtube.com/watch?v=KK56dSyu_SM")
+    st.caption("示例：YouTube 视频链接、Steam 评论页链接、X 帖子链接，或本地 txt/csv/jsonl 文件。")
     limit = st.slider("最大抓取条数", min_value=20, max_value=1000, value=200, step=20)
-    sort = st.selectbox("YouTube 排序", options=["popular", "recent"], index=0)
+    sort = "recent"
     timeout = st.slider("网页请求超时（秒）", min_value=5, max_value=60, value=15, step=5)
+
+    st.header("X 登录（抓取更完整的 X 评论时需要）")
+    x_saved_session_available = has_x_saved_login_state()
+    x_cookie_header = ""
+    x_csrf_token = ""
+    st.caption("推荐方式：直接点击“开始抓取并分析”。程序会先尝试复用本地已缓存的公开回复；如果需要更完整的线程或本地没有可复用缓存，再自动弹出本机 Microsoft Edge 登录窗口让你登录，这里不需要填写账号或密码。")
+    if x_saved_session_available:
+        st.caption("已检测到项目内保存的 X 登录态，会优先自动复用，以获取更完整的 X 评论线程。")
+    if st.button("预先登录 X 并保存会话", use_container_width=True):
+        try:
+            with st.spinner("正在打开 Microsoft Edge，请在弹出的窗口中完成 X 登录..."):
+                login_x_and_save_session(timeout_seconds=300.0)
+            st.success("X 登录态已保存，之后抓取 X 评论会自动复用。")
+            st.rerun()
+        except Exception as error:
+            st.error(f"X 登录失败: {error}")
+
+    with st.expander("手动提供已登录浏览器会话（高级，通常不需要）"):
+        x_cookie_header = st.text_input(
+            "已登录请求里的 Cookie Header（不是账号/密码）",
+            value="",
+            type="password",
+            help="仅在自动登录或本地缓存不可用时使用。这里要粘贴的是浏览器网络请求里的整段 Cookie，不是 X 账号、邮箱或密码。",
+        )
+        x_csrf_token = st.text_input(
+            "X CSRF Token（可选）",
+            value="",
+            type="password",
+            help="通常可留空；若你手填的 Cookie 里不含 ct0，再单独填写。",
+        )
+    st.caption("Steam / YouTube 无需填写任何会话信息。若你手填了高级会话，程序会优先使用；否则 X 会先复用项目内已保存登录态，再尝试本地已缓存的公开回复；仍不可用时才自动弹出本机 Microsoft Edge 登录窗口。")
+
+    if is_x_source(source) and not x_cookie_header.strip() and not x_saved_session_available:
+        st.info("当前尚未检测到本地 X 登录缓存。直接开始抓取时，程序会先尝试本地已缓存的公开回复；如果没有可复用缓存，再自动弹出 Microsoft Edge 登录窗口。上面的按钮只是用于提前登录。")
 
     st.header("清洗参数")
     min_info = st.slider("最低信息量阈值", min_value=0.0, max_value=1.0, value=0.10, step=0.01)
@@ -529,14 +674,20 @@ with st.sidebar:
     enable_translation = st.checkbox("启用结果翻译", value=False)
     target_language_label = st.selectbox("目标语言", options=list(TRANSLATION_LANGUAGES.keys()), index=1)
     translate_sample_limit = st.slider("样本区翻译条数", min_value=20, max_value=500, value=120, step=20)
-    st.caption("启用后会翻译：结论、词云关键词、评论样本和对照表（含 CSV 导出）。")
+    st.caption("启用后会翻译：结论、词云关键词；评论样本会尽量按所选语言显示对应翻译。")
 
     run_btn = st.button("开始抓取并分析", use_container_width=True)
 
 if run_btn:
     try:
         with st.spinner("正在抓取评论..."):
-            fetched = collect_from_source(source=source, limit=limit, sort=sort, timeout=float(timeout))
+            with temporary_env_vars(
+                {
+                    "X_COOKIE_HEADER": x_cookie_header.strip() or None,
+                    "X_CSRF_TOKEN": x_csrf_token.strip() or None,
+                }
+            ):
+                fetched = collect_from_source(source=source, limit=limit, sort=sort, timeout=float(timeout))
 
         raw_comments = [item.text for item in fetched]
         if not raw_comments:
@@ -561,26 +712,23 @@ if run_btn:
             render_fetch_quality_stats(fetched, comparison_df)
             render_conclusions(analysis)
 
+            target_lang = TRANSLATION_LANGUAGES[target_language_label]
             translated_conclusions: list[str] | None = None
             translated_kept_comments: list[str] | None = None
             translated_top_terms: list[tuple[str, float]] | None = None
-            translated_comparison_df: pd.DataFrame | None = None
+            sample_translation_error: str | None = None
             if enable_translation:
-                target_lang = TRANSLATION_LANGUAGES[target_language_label]
                 with st.spinner("正在翻译结果..."):
                     translated_conclusions = translate_texts(tuple(analysis.conclusions), target_lang)
                     translated_kept_comments = translate_texts(tuple(kept_comments[:translate_sample_limit]), target_lang)
                     translated_top_terms = build_translated_top_terms(analysis.top_terms, target_lang)
-                    translated_comparison_df = add_translation_columns_to_comparison_df(
-                        comparison_df,
-                        target_lang=target_lang,
-                    )
 
                 st.subheader(f"自动结论翻译（{target_language_label}）")
                 for line in translated_conclusions:
                     st.write(f"- {line}")
             else:
-                st.warning("当前未启用翻译：词云、评论表格和 CSV 将保持原文。")
+                translated_kept_comments = None
+                st.warning("当前未启用翻译：词云和自动结论将保持原文。")
 
             chart_terms = translated_top_terms if translated_top_terms is not None else None
             chart_suffix = f"（{target_language_label}）" if translated_top_terms is not None else ""
@@ -588,26 +736,22 @@ if run_btn:
 
             with st.expander("查看清洗后评论样本", expanded=False):
                 sample_comments = kept_comments[:200]
-                sample_df = pd.DataFrame({"comment": sample_comments})
-                if translated_kept_comments is not None:
-                    translated_series = translated_kept_comments[: len(sample_comments)]
-                    if len(translated_series) < len(sample_comments):
-                        translated_series.extend(sample_comments[len(translated_series) :])
-                    sample_df[f"translated_{target_language_label}"] = translated_series
+                if enable_translation and translated_kept_comments is not None:
+                    sample_translations = translated_kept_comments[: len(sample_comments)]
+                    if len(sample_translations) < len(sample_comments):
+                        sample_translations.extend(sample_comments[len(sample_translations) :])
+                    translation_column = f"对应翻译（{target_language_label}）"
+                    sample_df = pd.DataFrame(
+                        {
+                            "原文评论": sample_comments,
+                            translation_column: sample_translations,
+                        }
+                    )
+                else:
+                    sample_df = pd.DataFrame({"原文评论": sample_comments})
                 st.dataframe(sample_df, use_container_width=True)
 
-            with st.expander("查看原始评论与清洗结果对照", expanded=True):
-                display_df = translated_comparison_df if translated_comparison_df is not None else comparison_df
-                st.dataframe(display_df, use_container_width=True)
-                csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    label="下载对照结果 CSV",
-                    data=csv_data,
-                    file_name="comment_comparison.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
+            display_df = comparison_df
             render_comment_level_insights(display_df)
             render_raw_comment_common_conclusions(
                 raw_comments=raw_comments,
@@ -619,6 +763,10 @@ if run_btn:
             with st.expander("查看完整清洗报告 JSON", expanded=False):
                 st.json(clean_report)
     except Exception as error:
-        st.error(f"分析失败: {error}")
+        error_detail = str(error).strip()
+        if error_detail:
+            st.error(f"分析失败: {type(error).__name__}: {error_detail}")
+        else:
+            st.error(f"分析失败: {type(error).__name__}")
 else:
     st.info("在左侧输入来源后，点击“开始抓取并分析”。")

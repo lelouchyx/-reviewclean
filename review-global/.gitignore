@@ -1,0 +1,18 @@
+/browser_data/*
+!/browser_data/x_public_reply_snapshots/
+/browser_data/x_public_reply_snapshots/*
+.venv/
+__pycache__/
+*.pyc
+
+# Local outputs
+*.jsonl
+*.txt
+demo_report.json
+demo_cleaned.txt
+nte_x_visible_replies_en_zh_20.csv
+site/
+!/browser_data/x_public_reply_snapshots/2052327582277009536.jsonl
+
+# Exclude lecture notes file per request
+2 - 信息检索（中文）.md

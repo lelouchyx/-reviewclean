@@ -1,73 +1,49 @@
-# ReviewClean
+# ReviewClean Workspace
 
-评论抓取、清洗与分析工具（Streamlit 前端），支持：
+一个面向评论抓取、清洗和分析的工作区仓库，当前主要封装了两个方向的成果：
 
-- 本地文件与网页评论采集
-- YouTube 评论抓取（浏览器滚动 + API 回退）
-- 文本归一化、TF-IDF、近重复去重
-- 情绪/语气分析、词云与可视化
-- 翻译、对照表与 CSV 导出
+- review-global：当前主应用。基于 Streamlit，支持 X、Steam、YouTube 和本地文件的评论抓取、清洗、分析与可视化。
+- 根目录 B 站辅助脚本：用于登录态抓取、导出 CSV、生成摘要等一次性工具。
 
-## 目录说明
+## 当前推荐入口
 
-- app.py: Streamlit 前端入口
-- fetcher_youtube.py: YouTube 抓取模块（comment_fetcher.py 兼容入口）
-- fetcher_steam.py: Steam 抓取模块（含追评/编辑标记）
-- comment_cleaner.py: 评论清洗与去重模块
-- comment_analyzer.py: 评论分析模块
-- comment_io.py: 输入读取工具
-
-## 环境准备（Windows）
-
-1. 创建虚拟环境
+主应用入口位于 review-global：
 
 ```powershell
+cd review-global
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-2. 安装依赖
-
-```powershell
 pip install streamlit pandas matplotlib wordcloud requests beautifulsoup4
-pip install deep-translator selenium youtube-comment-downloader jieba nltk
-```
-
-说明：
-- 第二行依赖为可选增强（翻译、YouTube 抓取、中文分词、英文词干）。
-- 若不需要对应功能，可不安装。
-
-## 运行
-
-```powershell
+pip install deep-translator selenium youtube-comment-downloader jieba nltk playwright browser-cookie3
 .\.venv\Scripts\python.exe -m streamlit run .\app.py --server.port 8501
 ```
 
 浏览器打开：
 
-- http://localhost:8501
+- http://127.0.0.1:8501
 
-## 命令行使用（可选）
+## 仓库结构
 
-抓取评论：
+- review-global/: 主项目代码与 README
+- fetch_bilibili_comments.py: B 站评论抓取辅助脚本
+- fetch_bilibili_browser.py: B 站浏览器态抓取辅助脚本
+- export_bili_comments_csv.py: B 站评论导出 CSV
+- run_bilibili_crawler.py: B 站抓取入口脚本
 
-```powershell
-.\.venv\Scripts\python.exe .\fetcher-youtube.py --source "https://www.youtube.com/watch?v=VIDEO_ID" --limit 200 --output fetched_comments.jsonl --text-output fetched_comments.txt
-```
+## X/Twitter 说明
 
-抓取 Steam 评论（含追评检测）：
+review-global 当前的 X 抓取策略按优先级如下：
 
-```powershell
-.\.venv\Scripts\python.exe .\fetcher-steam.py --source "https://steamcommunity.com/app/1260320/reviews/?browsefilter=trendweek&p=1&filterLanguage=default" --limit 200 --output steam_reviews.jsonl --text-output steam_reviews.txt
-```
+1. 复用项目内已保存的 X 登录态
+2. 复用仓库内已收录的公开回复快照
+3. 必要时再弹出本机 Microsoft Edge 完成登录
 
-清洗评论：
+仓库当前已收录一份公开回复快照，用于稳定复现 NTE 这条帖子分析流程：
 
-```powershell
-.\.venv\Scripts\python.exe .\comment_cleaner.py --input fetched_comments.txt --output cleaned_report.json --clean-output cleaned_comments.txt
-```
+- review-global/browser_data/x_public_reply_snapshots/2052327582277009536.jsonl
 
-## 备注
+## GitHub 打包约定
 
-- 当前仓库默认不提交本地产物（jsonl/txt、缓存、虚拟环境）。
-- 文件 2 - 信息检索（中文）.md 已被排除，不会上传到仓库。
+- 不提交本机登录态、浏览器用户目录、虚拟环境、缓存目录
+- 保留一份经过验证的 X 公开回复快照，便于在无登录态时复现分析流程
+- 不提交一次性抓取产物和本地测试输出

@@ -80,6 +80,7 @@ class CollectedComment:
     parent_id: str | None = None
     is_reply: bool = False
     thread_topic: str | None = None
+    recommended: bool | None = None
 
 
 def normalize_space(text: str) -> str:
@@ -107,15 +108,17 @@ def collect_from_local_path(path: Path, limit: int) -> list[CollectedComment]:
 
 
 def collect_from_url(url: str, limit: int, sort: str, timeout: float) -> list[CollectedComment]:
-    host = urlparse(url).netloc.lower()
+    host = urlparse(url).netloc.lower().split(":")[0]
     collector = resolve_url_collector(host)
     if collector == "youtube":
         return collect_from_youtube(url, limit=limit, sort=sort)
+    if host.endswith("steamcommunity.com"):
+        raise RuntimeError("Steam 评论请使用 fetcher-steam.py 或 comment_fetcher.py，不通过 fetcher-youtube.py 处理。")
     return collect_from_generic_web(url, limit=limit, timeout=timeout)
 
 
 def resolve_url_collector(host: str) -> str:
-    if host in YOUTUBE_HOSTS:
+    if host in YOUTUBE_HOSTS or host.endswith("youtube.com"):
         return "youtube"
     return "generic"
 
@@ -593,12 +596,12 @@ def write_txt(comments: list[CollectedComment], output_path: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="独立的评论采集器，支持本地文件和网页 URL。")
+    parser = argparse.ArgumentParser(description="YouTube 评论采集器；Steam 请使用 fetcher-steam.py 或 comment_fetcher.py。")
     parser.add_argument("--source", required=True, help="输入来源，可为 txt/csv/jsonl 路径或网页链接")
     parser.add_argument("--output", type=Path, default=Path("fetched_comments.jsonl"), help="输出 JSONL 路径")
     parser.add_argument("--text-output", type=Path, help="额外输出纯文本评论，每行一条")
     parser.add_argument("--limit", type=int, default=100, help="最多抓取多少条评论")
-    parser.add_argument("--sort", choices=["popular", "recent"], default="popular", help="YouTube 评论排序方式")
+    parser.add_argument("--sort", choices=["popular", "recent"], default="recent", help="YouTube 评论排序方式，默认 recent")
     parser.add_argument("--timeout", type=float, default=15.0, help="普通网页请求超时时间，单位秒")
     return parser.parse_args()
 
